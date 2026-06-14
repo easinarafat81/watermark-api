@@ -31,9 +31,7 @@ def process_image(file_bytes):
             template_alpha = template[:, :, 3]
             
             found = None
-            
-            # আপডেট ১: সাইজ খোঁজার রেঞ্জ বাড়ানো হয়েছে। এখন সে একদম ছোট (0.3) থেকে অনেক বড় (2.0) ওয়াটারমার্কও স্ক্যান করবে।
-            for scale in np.linspace(0.3, 2.0, 25):
+            for scale in np.linspace(0.4, 1.5, 20):
                 resized_w = int(template_bgr.shape[1] * scale)
                 resized_h = int(template_bgr.shape[0] * scale)
                 
@@ -48,36 +46,29 @@ def process_image(file_bytes):
                 if found is None or max_val > found[0]:
                     found = (max_val, max_loc, scale, (resized_h, resized_w), res_alpha)
                     
-            # আপডেট ২: থ্রেশহোল্ড (Threshold) 0.65 থেকে কমিয়ে 0.45 করা হয়েছে। 
-            # এখন ব্যাকগ্রাউন্ড অন্ধকার বা আলাদা হলেও সে খুব সহজেই ওয়াটারমার্কটি ধরে ফেলবে।
             threshold = 0.45
             if found and found[0] >= threshold:
                 max_val, max_loc, scale, (th, tw), matched_alpha = found
                 x1, y1 = max_loc
                 
-                x2 = min(x1 + tw, w)
-                y2 = min(y1 + th, h)
-                actual_tw = x2 - x1
-                actual_th = y2 - y1
+                # ম্যাজিক ফিক্স: রেজর-থিন (Razor-thin) মাস্ক তৈরি। 
+                # ২০০ এর ওপরের ভ্যালু নেওয়ার মানে হলো শুধু সবচেয়ে গাঢ় সাদা অংশটুকুই সে মুছবে, চারপাশের হালকা অংশ ধরবে না।
+                _, tight_mask = cv2.threshold(matched_alpha, 200, 255, cv2.THRESH_BINARY)
                 
-                if actual_tw > 0 and actual_th > 0:
-                    roi = result[y1:y2, x1:x2].astype(np.float32)
-                    shape_mask = matched_alpha[0:actual_th, 0:actual_tw].astype(np.float32)
-                    shape_mask = cv2.GaussianBlur(shape_mask, (3, 3), 0)
-                    
-                    OPACITY_LEVEL = 0.35 
-                    normalized_alpha = (shape_mask / 255.0) * OPACITY_LEVEL
-                    alpha_3d = np.repeat(normalized_alpha[:, :, np.newaxis], 3, axis=2)
-                    alpha_3d = np.clip(alpha_3d, 0, 0.95)
-                    
-                    recovered = (roi - 255.0 * alpha_3d) / (1.0 - alpha_3d)
-                    recovered = np.clip(recovered, 0, 255).astype(np.uint8)
-                    result[y1:y2, x1:x2] = recovered
-                    
+                main_mask = np.zeros((h, w), dtype=np.uint8)
+                y2 = min(y1 + th, h)
+                x2 = min(x1 + tw, w)
+                mask_y_end = y2 - y1
+                mask_x_end = x2 - x1
+                
+                main_mask[y1:y2, x1:x2] = tight_mask[0:mask_y_end, 0:mask_x_end]
+                
+                # INPAINT_NS (Navier-Stokes) অ্যালগরিদম ব্যবহার করা হয়েছে, যা টেক্সচার এবং লাইন জোড়া লাগাতে সবচেয়ে ভালো কাজ করে।
+                result = cv2.inpaint(img, main_mask, 2, cv2.INPAINT_NS)
+                
         _, buffer = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
         return buffer.tobytes()
     except Exception as e:
-        print(f"Error processing image: {e}")
         return None
 
 @app.route('/process', methods=['POST'])
@@ -125,7 +116,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Sensitivity increased for all background types."
+    return "Server is Live! Using Razor-Thin Navier-Stokes Inpainting."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
