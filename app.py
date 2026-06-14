@@ -12,14 +12,20 @@ CORS(app, expose_headers=["Content-Disposition"])
 
 TEMPLATE_PATH = 'watermark_template.png'
 
-def process_image(file_bytes):
+def process_image(file_bytes, filename):
     try:
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None: return None
         
+        # ফাইলের আসল ফরম্যাট (Extension) বের করা হচ্ছে
+        ext = os.path.splitext(filename)[1].lower()
+        
         if not os.path.exists(TEMPLATE_PATH):
-            _, buffer = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            if ext == '.png':
+                _, buffer = cv2.imencode('.png', img, [int(cv2.IMWRITE_PNG_COMPRESSION), 0])
+            else:
+                _, buffer = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
             return buffer.tobytes()
             
         template = cv2.imread(TEMPLATE_PATH, cv2.IMREAD_UNCHANGED)
@@ -32,21 +38,14 @@ def process_image(file_bytes):
             
             found = None
             
-            # =======================================================
-            # MAGIC FIX: Targeted ROI Search (Region of Interest)
-            # =======================================================
-            # যেহেতু ওয়াটারমার্কটি সবসময় নিচে ডানদিকে থাকে, তাই আমরা 
-            # শুধুমাত্র নিচের ৪০% এবং ডানদিকের ৪০% জায়গায় স্ক্যান করবো।
             roi_y1 = int(h * 0.60)
             roi_x1 = int(w * 0.60)
             search_img = img[roi_y1:h, roi_x1:w]
             
-            # যদি ছবি খুব ছোট হয়, তবে পুরো ছবিই স্ক্যান করবে
             if search_img.shape[0] < 50 or search_img.shape[1] < 50:
                 roi_y1, roi_x1 = 0, 0
                 search_img = img
 
-            # স্কেল রেঞ্জ বাড়ানো হয়েছে (0.2 থেকে 3.0) যাতে যেকোনো সাইজের ছবিতে কাজ করে
             for scale in np.linspace(0.2, 3.0, 30):
                 resized_w = int(template_bgr.shape[1] * scale)
                 resized_h = int(template_bgr.shape[0] * scale)
@@ -56,17 +55,13 @@ def process_image(file_bytes):
                 res_bgr = cv2.resize(template_bgr, (resized_w, resized_h))
                 res_alpha = cv2.resize(template_alpha, (resized_w, resized_h))
                 
-                # শুধুমাত্র ডানদিকের নিচের কোণায় (search_img) ম্যাচিং করা হচ্ছে
                 res = cv2.matchTemplate(search_img, res_bgr, cv2.TM_CCORR_NORMED, mask=res_alpha)
                 _, max_val, _, max_loc = cv2.minMaxLoc(res)
                 
                 if found is None or max_val > found[0]:
-                    # মেইন ছবির সাথে লোকেশন ঠিক করার জন্য যোগ করা হচ্ছে
                     global_max_loc = (max_loc[0] + roi_x1, max_loc[1] + roi_y1)
                     found = (max_val, global_max_loc, scale, (resized_h, resized_w), res_alpha)
                     
-            # নির্দিষ্ট এরিয়ায় খোঁজার কারণে থ্রেশহোল্ড 0.25 এ নামানো সম্ভব হয়েছে! 
-            # এখন যত হিজিবিজি ব্যাকগ্রাউন্ডই হোক, সে ঠিকই খুঁজে বের করবে।
             threshold = 0.25
             if found and found[0] >= threshold:
                 max_val, max_loc, scale, (th, tw), matched_alpha = found
@@ -86,7 +81,14 @@ def process_image(file_bytes):
                 
                 result = cv2.inpaint(img, main_mask, 3, cv2.INPAINT_TELEA)
                 
-        _, buffer = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+        # --- ম্যাজিক ফিক্স: অরিজিনাল ফরম্যাট অনুযায়ী সেভ করা ---
+        if ext == '.png':
+            # PNG হলে 0 কম্প্রেশন (একদম লসলেস কোয়ালিটি)
+            _, buffer = cv2.imencode('.png', result, [int(cv2.IMWRITE_PNG_COMPRESSION), 0])
+        else:
+            # JPG হলে 100% কোয়ালিটি
+            _, buffer = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            
         return buffer.tobytes()
     except Exception as e:
         print(f"Error: {e}")
@@ -97,11 +99,14 @@ def process():
     files = request.files.getlist('images')
     zip_file = request.files.get('zipfile')
 
+    # সিঙ্গেল ছবি আপলোডের ক্ষেত্রে
     if files and len(files) == 1 and files[0].filename != '' and not zip_file:
         file = files[0]
-        processed_bytes = process_image(file.read())
+        processed_bytes = process_image(file.read(), file.filename)
         if processed_bytes:
-            return send_file(io.BytesIO(processed_bytes), mimetype='image/jpeg', as_attachment=True, download_name=f"clean_{file.filename}")
+            # ফরম্যাট অনুযায়ী Mimetype পাঠানো
+            mimetype = 'image/png' if file.filename.lower().endswith('.png') else 'image/jpeg'
+            return send_file(io.BytesIO(processed_bytes), mimetype=mimetype, as_attachment=True, download_name=f"clean_{file.filename}")
 
     memory_file = io.BytesIO()
     with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -109,7 +114,7 @@ def process():
             for file in files:
                 if file.filename == '': continue
                 file_data = file.read()
-                processed_bytes = process_image(file_data)
+                processed_bytes = process_image(file_data, file.filename)
                 if processed_bytes:
                     zf.writestr(f"clean_{file.filename}", processed_bytes)
                 del file_data
@@ -123,7 +128,7 @@ def process():
                     if not filename.lower().endswith(('.png', '.jpg', '.jpeg')): continue
                     
                     file_data = uploaded_zip.read(filename)
-                    processed_bytes = process_image(file_data)
+                    processed_bytes = process_image(file_data, filename)
                     
                     if processed_bytes:
                         zf.writestr(filename, processed_bytes)
@@ -137,7 +142,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Updated! Targeted ROI Search (Bottom-Right) is active."
+    return "Server is Updated! Original Quality & Format Preserved."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
