@@ -6,7 +6,7 @@ import zipfile
 import io
 import os
 import gc
-from PIL import Image, PngImagePlugin  # মেটাডেটা হ্যান্ডেল করার জন্য নতুন যুক্ত করা হলো
+from PIL import Image, PngImagePlugin
 
 app = Flask(__name__)
 CORS(app, expose_headers=["Content-Disposition"])
@@ -15,7 +15,6 @@ TEMPLATE_PATH = 'watermark_template.png'
 
 def process_image(file_bytes, filename):
     try:
-        # ১. OpenCV দিয়ে ইমেজ প্রসেসিং
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None: return None
@@ -23,7 +22,7 @@ def process_image(file_bytes, filename):
         ext = os.path.splitext(filename)[1].lower()
         
         if not os.path.exists(TEMPLATE_PATH):
-            return file_bytes # অরিজিনাল ফাইলই ফেরত দিয়ে দিলাম
+            return file_bytes
             
         template = cv2.imread(TEMPLATE_PATH, cv2.IMREAD_UNCHANGED)
         h, w = img.shape[:2]
@@ -63,52 +62,50 @@ def process_image(file_bytes, filename):
                 max_val, max_loc, scale, (th, tw), matched_alpha = found
                 x1, y1 = max_loc
                 
-                _, tight_mask = cv2.threshold(matched_alpha, 15, 255, cv2.THRESH_BINARY)
-                kernel = np.ones((5, 5), np.uint8)
-                tight_mask = cv2.dilate(tight_mask, kernel, iterations=1)
-                
-                main_mask = np.zeros((h, w), dtype=np.uint8)
                 y2 = min(y1 + th, h)
                 x2 = min(x1 + tw, w)
                 mask_y_end = y2 - y1
                 mask_x_end = x2 - x1
                 
-                main_mask[y1:y2, x1:x2] = tight_mask[0:mask_y_end, 0:mask_x_end]
+                if mask_x_end > 0 and mask_y_end > 0:
+                    roi = result[y1:y2, x1:x2].astype(np.float32)
+                    
+                    # ==========================================================
+                    # MAGIC FIX: Reverse Alpha Blending (No Inpainting / Blurring)
+                    # ==========================================================
+                    # এটি অরিজিনাল পিক্সেল রিকভার করবে, তাই ঝুড়ির খাঁজ বা টেক্সচার নষ্ট হবে না
+                    OPACITY = 0.32 
+                    base_alpha = matched_alpha[0:mask_y_end, 0:mask_x_end].astype(np.float32) / 255.0
+                    base_alpha = cv2.GaussianBlur(base_alpha, (3, 3), 0)
+                    
+                    alpha_3d = np.repeat((base_alpha * OPACITY)[:, :, np.newaxis], 3, axis=2)
+                    alpha_3d = np.clip(alpha_3d, 0, 0.9) 
+                    
+                    # Formula: Original = (Watermarked - White * Alpha) / (1 - Alpha)
+                    recovered = (roi - 255.0 * alpha_3d) / (1.0 - alpha_3d + 1e-6)
+                    
+                    result[y1:y2, x1:x2] = np.clip(recovered, 0, 255).astype(np.uint8)
                 
-                result = cv2.inpaint(img, main_mask, 3, cv2.INPAINT_TELEA)
-                
-        # ==========================================
-        # ২. PIL দিয়ে মেটাডেটা রিকভারি এবং ইনজেকশন
-        # ==========================================
-        # OpenCV BGR-এ কাজ করে, PIL RGB-তে। তাই কালার চ্যানেল কনভার্ট করা হচ্ছে
+        # PIL দিয়ে মেটাডেটা ও অরিজিনাল কোয়ালিটি বজায় রেখে সেভ করা
         result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(result_rgb)
         
-        # অরিজিনাল ছবিটি মেমরিতে রিড করে তার অদৃশ্য মেটাডেটা বের করে আনা হচ্ছে
         orig_pil = Image.open(io.BytesIO(file_bytes))
-        icc_profile = orig_pil.info.get('icc_profile') # কালার কোয়ালিটি প্রোফাইল
+        icc_profile = orig_pil.info.get('icc_profile')
         
         out_bytes = io.BytesIO()
         
         if ext == '.png':
-            # PNG ছবির জন্য টেক্সট চ্যাঙ্ক (Text Chunks) রিকভার করা
             pnginfo = PngImagePlugin.PngInfo()
             for k, v in orig_pil.info.items():
                 if isinstance(v, str):
                     pnginfo.add_text(k, v)
-            
-            # মেটাডেটা সহ সেভ করা
             pil_img.save(out_bytes, format='PNG', pnginfo=pnginfo, icc_profile=icc_profile)
         else:
-            # JPG ছবির জন্য EXIF Data (ক্যামেরা, লোকেশন, তারিখ) রিকভার করা
             exif = orig_pil.info.get('exif')
             save_kwargs = {'format': 'JPEG', 'quality': 100}
-            
-            if exif: 
-                save_kwargs['exif'] = exif
-            if icc_profile: 
-                save_kwargs['icc_profile'] = icc_profile
-                
+            if exif: save_kwargs['exif'] = exif
+            if icc_profile: save_kwargs['icc_profile'] = icc_profile
             pil_img.save(out_bytes, **save_kwargs)
             
         return out_bytes.getvalue()
@@ -162,7 +159,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Updated! Metadata (EXIF) and ICC Profiles are fully preserved."
+    return "Server is Live! Reverse Alpha Blending is Active."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
