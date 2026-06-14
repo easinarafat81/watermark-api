@@ -5,7 +5,7 @@ import numpy as np
 import zipfile
 import io
 import os
-import gc  # মেমরি ফাঁকা করার জন্য
+import gc
 
 app = Flask(__name__)
 CORS(app, expose_headers=["Content-Disposition"])
@@ -31,7 +31,9 @@ def process_image(file_bytes):
             template_alpha = template[:, :, 3]
             
             found = None
-            for scale in np.linspace(0.5, 1.5, 15):
+            
+            # আপডেট ১: সাইজ খোঁজার রেঞ্জ বাড়ানো হয়েছে। এখন সে একদম ছোট (0.3) থেকে অনেক বড় (2.0) ওয়াটারমার্কও স্ক্যান করবে।
+            for scale in np.linspace(0.3, 2.0, 25):
                 resized_w = int(template_bgr.shape[1] * scale)
                 resized_h = int(template_bgr.shape[0] * scale)
                 
@@ -46,7 +48,9 @@ def process_image(file_bytes):
                 if found is None or max_val > found[0]:
                     found = (max_val, max_loc, scale, (resized_h, resized_w), res_alpha)
                     
-            threshold = 0.65
+            # আপডেট ২: থ্রেশহোল্ড (Threshold) 0.65 থেকে কমিয়ে 0.45 করা হয়েছে। 
+            # এখন ব্যাকগ্রাউন্ড অন্ধকার বা আলাদা হলেও সে খুব সহজেই ওয়াটারমার্কটি ধরে ফেলবে।
+            threshold = 0.45
             if found and found[0] >= threshold:
                 max_val, max_loc, scale, (th, tw), matched_alpha = found
                 x1, y1 = max_loc
@@ -89,7 +93,6 @@ def process():
 
     memory_file = io.BytesIO()
     with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        # একাধিক ছবি সিলেক্ট করলে
         if files:
             for file in files:
                 if file.filename == '': continue
@@ -97,19 +100,14 @@ def process():
                 processed_bytes = process_image(file_data)
                 if processed_bytes:
                     zf.writestr(f"clean_{file.filename}", processed_bytes)
-                
-                # RAM ফাঁকা করা
                 del file_data
                 del processed_bytes
                 gc.collect()
         
-        # জিপ ফাইল আপলোড করলে
         if zip_file:
             with zipfile.ZipFile(zip_file, 'r') as uploaded_zip:
                 for filename in uploaded_zip.namelist():
                     if filename.startswith('__MACOSX') or filename.endswith('/'): continue
-                    
-                    # শুধু ইমেজে ফাইল ফিল্টার করা
                     if not filename.lower().endswith(('.png', '.jpg', '.jpeg')): continue
                     
                     file_data = uploaded_zip.read(filename)
@@ -118,7 +116,6 @@ def process():
                     if processed_bytes:
                         zf.writestr(filename, processed_bytes)
                     
-                    # প্রতিটি ছবি প্রসেসের পর RAM ক্লিয়ার করা যাতে সার্ভার ক্র্যাশ না করে
                     del file_data
                     del processed_bytes
                     gc.collect()
@@ -128,7 +125,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Timeout and Memory optimized for ZIP files."
+    return "Server is Live! Sensitivity increased for all background types."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
