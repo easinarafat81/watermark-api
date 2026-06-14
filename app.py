@@ -44,31 +44,42 @@ def process_image(file_bytes):
             if found is None or max_val > found[0]:
                 found = (max_val, max_loc, scale, (resized_h, resized_w), res_alpha)
                 
-        # থ্রেশহোল্ড 0.65 রাখা হলো যাতে সহজেই ওয়াটারমার্ক খুঁজে পায়
         threshold = 0.65
         if found and found[0] >= threshold:
             max_val, max_loc, scale, (th, tw), matched_alpha = found
             x1, y1 = max_loc
             
-            main_mask = np.zeros((h, w), dtype=np.uint8)
-            
-            # --- ম্যাজিক ফিক্স ---
-            # থ্রেশহোল্ড 100 করে দেওয়া হয়েছে। এতে remove.bg এর ফেলে যাওয়া চারকোনা অদৃশ্য বক্সটি আর ধরবে না।
-            # শুধুমাত্র তারার সলিড শেপটুকুই মাস্ক হিসেবে কাজ করবে।
-            _, exact_shape_mask = cv2.threshold(matched_alpha, 100, 255, cv2.THRESH_BINARY)
-            
-            y2 = min(y1 + th, h)
             x2 = min(x1 + tw, w)
-            mask_y_end = y2 - y1
-            mask_x_end = x2 - x1
+            y2 = min(y1 + th, h)
+            actual_tw = x2 - x1
+            actual_th = y2 - y1
             
-            main_mask[y1:y2, x1:x2] = exact_shape_mask[0:mask_y_end, 0:mask_x_end]
-            
-            # আগের মতো মাস্ককে ডাইলেট (Dilate) করা হচ্ছে না, যাতে ঘাসের ওপর ব্লার না ছড়ায়।
-            
-            # INPAINT_TELEA এলগরিদম ছোট দাগ মোছার জন্য সেরা, রেডিয়াস 2 রাখা হয়েছে ব্যাকগ্রাউন্ড ঠিক রাখার জন্য।
-            result = cv2.inpaint(img, main_mask, 2, cv2.INPAINT_TELEA)
-            
+            if actual_tw > 0 and actual_th > 0:
+                roi = result[y1:y2, x1:x2].astype(np.float32)
+                
+                # শুধু তারার শেপটুকু নেওয়া হচ্ছে
+                shape_mask = matched_alpha[0:actual_th, 0:actual_tw].astype(np.float32)
+                
+                # শেপের চারপাশ হালকা ব্লেন্ড করার জন্য Gaussian Blur (যাতে হার্ড লাইন না থাকে)
+                shape_mask = cv2.GaussianBlur(shape_mask, (3, 3), 0)
+                
+                # ==========================================
+                # ম্যাজিক সেকশন (ওয়াটারমার্কের সাদা রং বিয়োগ করা)
+                # ==========================================
+                # ওয়াটারমার্কের অপাসিটি বা গাঢ়ত্ব (ডিফল্ট 0.35 বা 35% রাখা হয়েছে)
+                OPACITY_LEVEL = 0.35 
+                
+                normalized_alpha = (shape_mask / 255.0) * OPACITY_LEVEL
+                alpha_3d = np.repeat(normalized_alpha[:, :, np.newaxis], 3, axis=2)
+                alpha_3d = np.clip(alpha_3d, 0, 0.95) # এরর ঠেকানোর জন্য
+                
+                # গাণিতিক সূত্র: Original Pixel = (Watermarked Pixel - White * Alpha) / (1 - Alpha)
+                # এই সূত্রটি ব্যাকগ্রাউন্ড ব্লার না করে শুধুমাত্র সাদা প্রলেপটি তুলে নেবে!
+                recovered = (roi - 255.0 * alpha_3d) / (1.0 - alpha_3d)
+                
+                recovered = np.clip(recovered, 0, 255).astype(np.uint8)
+                result[y1:y2, x1:x2] = recovered
+                
     _, buffer = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
     return buffer.tobytes()
 
@@ -106,7 +117,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live and working with Precise Masking!"
+    return "Server is Live! Inpainting removed, using Math Subtraction."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
