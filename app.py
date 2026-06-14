@@ -42,42 +42,32 @@ def process_image(file_bytes):
             _, max_val, _, max_loc = cv2.minMaxLoc(res)
             
             if found is None or max_val > found[0]:
-                found = (max_val, max_loc, scale, (resized_h, resized_w), res_alpha, res_bgr)
+                found = (max_val, max_loc, scale, (resized_h, resized_w), res_alpha)
                 
-        threshold = 0.70
+        # থ্রেশহোল্ড 0.65 রাখা হলো যাতে সহজেই ওয়াটারমার্ক খুঁজে পায়
+        threshold = 0.65
         if found and found[0] >= threshold:
-            max_val, max_loc, scale, (th, tw), matched_alpha, matched_bgr = found
+            max_val, max_loc, scale, (th, tw), matched_alpha = found
             x1, y1 = max_loc
             
-            # ছবির সীমানার বাইরে যেন না যায়
-            x2 = min(x1 + tw, w)
-            y2 = min(y1 + th, h)
-            actual_tw = x2 - x1
-            actual_th = y2 - y1
+            main_mask = np.zeros((h, w), dtype=np.uint8)
             
-            if actual_tw > 0 and actual_th > 0:
-                # মূল ছবির যে অংশে ওয়াটারমার্ক আছে, সেই অংশটুকু (ROI) কাটা
-                roi = result[y1:y2, x1:x2].astype(np.float32)
-                
-                # টেমপ্লেট সাইজ ঠিক করা
-                temp_bgr = matched_bgr[0:actual_th, 0:actual_tw].astype(np.float32)
-                temp_alpha = matched_alpha[0:actual_th, 0:actual_tw].astype(np.float32)
-                
-                # ------ ম্যাজিক শুরু (Alpha Blending Reversal) ------
-                # আমরা ইনপেইন্ট (Inpaint) করবো না। আমরা শুধু সাদা রঙের Opacity বিয়োগ করবো।
-                
-                # ওয়াটারমার্কের Opacity লেভেল (যদি দেখেন জায়গাটা বেশি কালো হয়ে গেছে, তবে এটি কমিয়ে 0.4 করবেন। আর যদি দেখেন সাদা রয়ে গেছে, তবে বাড়িয়ে 0.7 করবেন)
-                OPACITY_STRENGTH = 0.55 
-                
-                alpha_mask = (temp_alpha / 255.0) * OPACITY_STRENGTH
-                alpha_3d = np.repeat(alpha_mask[:, :, np.newaxis], 3, axis=2)
-                
-                # ফর্মুলা: Original = (Watermarked - (Template * Alpha)) / (1 - Alpha)
-                recovered = (roi - (temp_bgr * alpha_3d)) / (1.0 - alpha_3d + 1e-6)
-                
-                # রিকভার করা পিক্সেলগুলো মূল ছবিতে বসিয়ে দেওয়া
-                recovered = np.clip(recovered, 0, 255).astype(np.uint8)
-                result[y1:y2, x1:x2] = recovered
+            # --- ম্যাজিক ফিক্স ---
+            # থ্রেশহোল্ড 100 করে দেওয়া হয়েছে। এতে remove.bg এর ফেলে যাওয়া চারকোনা অদৃশ্য বক্সটি আর ধরবে না।
+            # শুধুমাত্র তারার সলিড শেপটুকুই মাস্ক হিসেবে কাজ করবে।
+            _, exact_shape_mask = cv2.threshold(matched_alpha, 100, 255, cv2.THRESH_BINARY)
+            
+            y2 = min(y1 + th, h)
+            x2 = min(x1 + tw, w)
+            mask_y_end = y2 - y1
+            mask_x_end = x2 - x1
+            
+            main_mask[y1:y2, x1:x2] = exact_shape_mask[0:mask_y_end, 0:mask_x_end]
+            
+            # আগের মতো মাস্ককে ডাইলেট (Dilate) করা হচ্ছে না, যাতে ঘাসের ওপর ব্লার না ছড়ায়।
+            
+            # INPAINT_TELEA এলগরিদম ছোট দাগ মোছার জন্য সেরা, রেডিয়াস 2 রাখা হয়েছে ব্যাকগ্রাউন্ড ঠিক রাখার জন্য।
+            result = cv2.inpaint(img, main_mask, 2, cv2.INPAINT_TELEA)
             
     _, buffer = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
     return buffer.tobytes()
@@ -116,7 +106,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live and Running Perfectly with Alpha Reversal!"
+    return "Server is Live and working with Precise Masking!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
