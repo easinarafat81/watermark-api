@@ -51,9 +51,13 @@ def process_image(file_bytes):
                 max_val, max_loc, scale, (th, tw), matched_alpha = found
                 x1, y1 = max_loc
                 
-                # ম্যাজিক ফিক্স: রেজর-থিন (Razor-thin) মাস্ক তৈরি। 
-                # ২০০ এর ওপরের ভ্যালু নেওয়ার মানে হলো শুধু সবচেয়ে গাঢ় সাদা অংশটুকুই সে মুছবে, চারপাশের হালকা অংশ ধরবে না।
-                _, tight_mask = cv2.threshold(matched_alpha, 200, 255, cv2.THRESH_BINARY)
+                # --- ম্যাজিক ফিক্স (Solid Mask) ---
+                # ১৫ এর উপরে থাকা সব আলফা পিক্সেলকে সলিড সাদা করা হলো (যাতে মাঝখানে ফাঁকা না থাকে)
+                _, tight_mask = cv2.threshold(matched_alpha, 15, 255, cv2.THRESH_BINARY)
+                
+                # মাস্কটিকে চারপাশ থেকে একটু মোটা (Dilate) করা হলো, যাতে ওয়াটারমার্কের কোনো দাগ অবশিষ্ট না থাকে
+                kernel = np.ones((5, 5), np.uint8)
+                tight_mask = cv2.dilate(tight_mask, kernel, iterations=1)
                 
                 main_mask = np.zeros((h, w), dtype=np.uint8)
                 y2 = min(y1 + th, h)
@@ -63,12 +67,13 @@ def process_image(file_bytes):
                 
                 main_mask[y1:y2, x1:x2] = tight_mask[0:mask_y_end, 0:mask_x_end]
                 
-                # INPAINT_NS (Navier-Stokes) অ্যালগরিদম ব্যবহার করা হয়েছে, যা টেক্সচার এবং লাইন জোড়া লাগাতে সবচেয়ে ভালো কাজ করে।
-                result = cv2.inpaint(img, main_mask, 2, cv2.INPAINT_NS)
+                # INPAINT_TELEA ব্যবহার করা হলো, যা যেকোনো ব্যাকগ্রাউন্ডের সাথে সবচেয়ে ভালো ব্লেন্ড হয়
+                result = cv2.inpaint(img, main_mask, 3, cv2.INPAINT_TELEA)
                 
         _, buffer = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
         return buffer.tobytes()
     except Exception as e:
+        print(f"Error: {e}")
         return None
 
 @app.route('/process', methods=['POST'])
@@ -116,7 +121,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Using Razor-Thin Navier-Stokes Inpainting."
+    return "Server is Updated! Final Solid Mask Applied."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
