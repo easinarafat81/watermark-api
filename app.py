@@ -6,6 +6,7 @@ import zipfile
 import io
 import os
 import gc
+from PIL import Image, PngImagePlugin  # মেটাডেটা হ্যান্ডেল করার জন্য নতুন যুক্ত করা হলো
 
 app = Flask(__name__)
 CORS(app, expose_headers=["Content-Disposition"])
@@ -14,19 +15,15 @@ TEMPLATE_PATH = 'watermark_template.png'
 
 def process_image(file_bytes, filename):
     try:
+        # ১. OpenCV দিয়ে ইমেজ প্রসেসিং
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None: return None
         
-        # ফাইলের আসল ফরম্যাট (Extension) বের করা হচ্ছে
         ext = os.path.splitext(filename)[1].lower()
         
         if not os.path.exists(TEMPLATE_PATH):
-            if ext == '.png':
-                _, buffer = cv2.imencode('.png', img, [int(cv2.IMWRITE_PNG_COMPRESSION), 0])
-            else:
-                _, buffer = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
-            return buffer.tobytes()
+            return file_bytes # অরিজিনাল ফাইলই ফেরত দিয়ে দিলাম
             
         template = cv2.imread(TEMPLATE_PATH, cv2.IMREAD_UNCHANGED)
         h, w = img.shape[:2]
@@ -37,7 +34,6 @@ def process_image(file_bytes, filename):
             template_alpha = template[:, :, 3]
             
             found = None
-            
             roi_y1 = int(h * 0.60)
             roi_x1 = int(w * 0.60)
             search_img = img[roi_y1:h, roi_x1:w]
@@ -81,15 +77,41 @@ def process_image(file_bytes, filename):
                 
                 result = cv2.inpaint(img, main_mask, 3, cv2.INPAINT_TELEA)
                 
-        # --- ম্যাজিক ফিক্স: অরিজিনাল ফরম্যাট অনুযায়ী সেভ করা ---
+        # ==========================================
+        # ২. PIL দিয়ে মেটাডেটা রিকভারি এবং ইনজেকশন
+        # ==========================================
+        # OpenCV BGR-এ কাজ করে, PIL RGB-তে। তাই কালার চ্যানেল কনভার্ট করা হচ্ছে
+        result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(result_rgb)
+        
+        # অরিজিনাল ছবিটি মেমরিতে রিড করে তার অদৃশ্য মেটাডেটা বের করে আনা হচ্ছে
+        orig_pil = Image.open(io.BytesIO(file_bytes))
+        icc_profile = orig_pil.info.get('icc_profile') # কালার কোয়ালিটি প্রোফাইল
+        
+        out_bytes = io.BytesIO()
+        
         if ext == '.png':
-            # PNG হলে 0 কম্প্রেশন (একদম লসলেস কোয়ালিটি)
-            _, buffer = cv2.imencode('.png', result, [int(cv2.IMWRITE_PNG_COMPRESSION), 0])
-        else:
-            # JPG হলে 100% কোয়ালিটি
-            _, buffer = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            # PNG ছবির জন্য টেক্সট চ্যাঙ্ক (Text Chunks) রিকভার করা
+            pnginfo = PngImagePlugin.PngInfo()
+            for k, v in orig_pil.info.items():
+                if isinstance(v, str):
+                    pnginfo.add_text(k, v)
             
-        return buffer.tobytes()
+            # মেটাডেটা সহ সেভ করা
+            pil_img.save(out_bytes, format='PNG', pnginfo=pnginfo, icc_profile=icc_profile)
+        else:
+            # JPG ছবির জন্য EXIF Data (ক্যামেরা, লোকেশন, তারিখ) রিকভার করা
+            exif = orig_pil.info.get('exif')
+            save_kwargs = {'format': 'JPEG', 'quality': 100}
+            
+            if exif: 
+                save_kwargs['exif'] = exif
+            if icc_profile: 
+                save_kwargs['icc_profile'] = icc_profile
+                
+            pil_img.save(out_bytes, **save_kwargs)
+            
+        return out_bytes.getvalue()
     except Exception as e:
         print(f"Error: {e}")
         return None
@@ -99,12 +121,10 @@ def process():
     files = request.files.getlist('images')
     zip_file = request.files.get('zipfile')
 
-    # সিঙ্গেল ছবি আপলোডের ক্ষেত্রে
     if files and len(files) == 1 and files[0].filename != '' and not zip_file:
         file = files[0]
         processed_bytes = process_image(file.read(), file.filename)
         if processed_bytes:
-            # ফরম্যাট অনুযায়ী Mimetype পাঠানো
             mimetype = 'image/png' if file.filename.lower().endswith('.png') else 'image/jpeg'
             return send_file(io.BytesIO(processed_bytes), mimetype=mimetype, as_attachment=True, download_name=f"clean_{file.filename}")
 
@@ -142,7 +162,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Updated! Original Quality & Format Preserved."
+    return "Server is Updated! Metadata (EXIF) and ICC Profiles are fully preserved."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
