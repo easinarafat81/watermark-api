@@ -20,19 +20,15 @@ def process_image(file_bytes):
         _, buffer = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
         return buffer.tobytes()
         
-    # টেমপ্লেটটি আলফা চ্যানেল (Transparency) সহ রিড করা
     template = cv2.imread(TEMPLATE_PATH, cv2.IMREAD_UNCHANGED)
-    
     h, w = img.shape[:2]
     result = img.copy()
     
-    # টেমপ্লেটে ট্রান্সপারেন্ট ব্যাকগ্রাউন্ড আছে কিনা চেক করা
     if len(template.shape) == 3 and template.shape[2] == 4:
         template_bgr = template[:, :, :3]
         template_alpha = template[:, :, 3]
         
         found = None
-        # স্কেলিং করে সঠিক সাইজটি খোঁজা
         for scale in np.linspace(0.5, 1.5, 15):
             resized_w = int(template_bgr.shape[1] * scale)
             resized_h = int(template_bgr.shape[0] * scale)
@@ -46,34 +42,42 @@ def process_image(file_bytes):
             _, max_val, _, max_loc = cv2.minMaxLoc(res)
             
             if found is None or max_val > found[0]:
-                found = (max_val, max_loc, scale, (resized_h, resized_w), res_alpha)
+                found = (max_val, max_loc, scale, (resized_h, resized_w), res_alpha, res_bgr)
                 
-        threshold = 0.75
+        threshold = 0.70
         if found and found[0] >= threshold:
-            max_val, max_loc, scale, (th, tw), matched_alpha = found
+            max_val, max_loc, scale, (th, tw), matched_alpha, matched_bgr = found
             x1, y1 = max_loc
             
-            # ১. পুরো ছবির সাইজের একটি ফাঁকা কালো মাস্ক তৈরি
-            main_mask = np.zeros((h, w), dtype=np.uint8)
-            
-            # ২. টেমপ্লেটের আলফা চ্যানেল থেকে শুধু তারার শেপ (Shape) বের করা
-            _, exact_shape_mask = cv2.threshold(matched_alpha, 10, 255, cv2.THRESH_BINARY)
-            
-            # ৩. মাস্কটি ছবির সীমানার বাইরে যেন না যায় তার হিসাব
-            y2 = min(y1 + th, h)
+            # ছবির সীমানার বাইরে যেন না যায়
             x2 = min(x1 + tw, w)
-            mask_y_end = y2 - y1
-            mask_x_end = x2 - x1
+            y2 = min(y1 + th, h)
+            actual_tw = x2 - x1
+            actual_th = y2 - y1
             
-            # ৪. স্কয়ার বক্সের বদলে একদম নিখুঁত শেপটি মূল মাস্কে বসিয়ে দেওয়া
-            main_mask[y1:y2, x1:x2] = exact_shape_mask[0:mask_y_end, 0:mask_x_end]
-            
-            # ৫. শেপটিকে সুক্ষ্মভাবে একটু মোটা করা (যাতে ওয়াটারমার্কের চারপাশের হালকা সাদাও কভার হয়)
-            kernel = np.ones((3, 3), np.uint8)
-            main_mask = cv2.dilate(main_mask, kernel, iterations=1)
-            
-            # ৬. ইনপেইন্টিং (INPAINT_NS টেক্সচার রিকভারির জন্য ভালো কাজ করে এবং এরিয়া ছোট করা হয়েছে)
-            result = cv2.inpaint(img, main_mask, 2, cv2.INPAINT_NS)
+            if actual_tw > 0 and actual_th > 0:
+                # মূল ছবির যে অংশে ওয়াটারমার্ক আছে, সেই অংশটুকু (ROI) কাটা
+                roi = result[y1:y2, x1:x2].astype(np.float32)
+                
+                # টেমপ্লেট সাইজ ঠিক করা
+                temp_bgr = matched_bgr[0:actual_th, 0:actual_tw].astype(np.float32)
+                temp_alpha = matched_alpha[0:actual_th, 0:actual_tw].astype(np.float32)
+                
+                # ------ ম্যাজিক শুরু (Alpha Blending Reversal) ------
+                # আমরা ইনপেইন্ট (Inpaint) করবো না। আমরা শুধু সাদা রঙের Opacity বিয়োগ করবো।
+                
+                # ওয়াটারমার্কের Opacity লেভেল (যদি দেখেন জায়গাটা বেশি কালো হয়ে গেছে, তবে এটি কমিয়ে 0.4 করবেন। আর যদি দেখেন সাদা রয়ে গেছে, তবে বাড়িয়ে 0.7 করবেন)
+                OPACITY_STRENGTH = 0.55 
+                
+                alpha_mask = (temp_alpha / 255.0) * OPACITY_STRENGTH
+                alpha_3d = np.repeat(alpha_mask[:, :, np.newaxis], 3, axis=2)
+                
+                # ফর্মুলা: Original = (Watermarked - (Template * Alpha)) / (1 - Alpha)
+                recovered = (roi - (temp_bgr * alpha_3d)) / (1.0 - alpha_3d + 1e-6)
+                
+                # রিকভার করা পিক্সেলগুলো মূল ছবিতে বসিয়ে দেওয়া
+                recovered = np.clip(recovered, 0, 255).astype(np.uint8)
+                result[y1:y2, x1:x2] = recovered
             
     _, buffer = cv2.imencode('.jpg', result, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
     return buffer.tobytes()
@@ -112,7 +116,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live and Running Perfectly!"
+    return "Server is Live and Running Perfectly with Alpha Reversal!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
