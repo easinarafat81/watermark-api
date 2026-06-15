@@ -63,9 +63,9 @@ def process_image(file_bytes, filename):
                 x1, y1 = max_loc
                 
                 # ==========================================================
-                # MAGIC FIX: Perfect Inpainting Mask
+                # MAGIC FIX: Perfect Inpainting Mask (Thick & Precise)
                 # ==========================================================
-                # ১. থ্রেশহোল্ড (Threshold) কমিয়ে ৫ করা হয়েছে, যাতে তারার চারপাশের ঝাপসা অংশও বাদ না পড়ে।
+                # ১. থ্রেশহোল্ড (Threshold) 5 করা হয়েছে, যাতে তারার চারপাশের ঝাপসা অংশও বাদ না পড়ে।
                 _, tight_mask = cv2.threshold(matched_alpha, 5, 255, cv2.THRESH_BINARY)
                 
                 # ২. মাস্কটিকে অনেক বেশি মোটা (7x7, 2 iterations) করা হয়েছে। 
@@ -81,7 +81,8 @@ def process_image(file_bytes, filename):
                 
                 main_mask[y1:y2, x1:x2] = thick_mask[0:mask_y_end, 0:mask_x_end]
                 
-                # ৩. INPAINT_NS (Navier-Stokes) ব্যবহার করা হয়েছে। এটি ঝুড়ির খাঁজ বা লাইন জোড়া লাগাতে সবচেয়ে ভালো কাজ করে।
+                # ৩. INPAINT_NS (Navier-Stokes) ব্যবহার করা হয়েছে এবং রেডিয়াস 4 দেওয়া হয়েছে। 
+                # এটি ঝুড়ির খাঁজ বা লাইন জোড়া লাগাতে সবচেয়ে ভালো কাজ করে।
                 result = cv2.inpaint(img, main_mask, 4, cv2.INPAINT_NS)
                 
         # মেটাডেটা রিকভারি
@@ -157,7 +158,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Advanced Navier-Stokes Inpainting Active."
+    return "Server is Live! Advanced Thick-Mask Inpainting Active."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
