@@ -68,31 +68,26 @@ def process_image(file_bytes, filename):
                 mask_x_end = x2 - x1
                 
                 if mask_x_end > 0 and mask_y_end > 0:
-                    roi = result[y1:y2, x1:x2]
-                    roi_float = roi.astype(np.float32)
-                    base_alpha = matched_alpha[0:mask_y_end, 0:mask_x_end]
-                    
                     # ==========================================================
-                    # MAGIC FIX: Exact 2-Pixel Dilation + Feathered Blending
+                    # MAGIC FIX: Full-Canvas Star Masking (No Square Edges)
                     # ==========================================================
-                    # ১. তারার মূল শেপ ধরা (খুব হালকা অংশও যেন বাদ না যায়)
-                    _, core_mask = cv2.threshold(base_alpha, 3, 255, cv2.THRESH_BINARY)
+                    # ১. মাস্কটিকে আগে পুরো ছবির সমান একটি বিশাল কালো ক্যানভাসে বসানো হচ্ছে। 
+                    # এর ফলে এটি চারদিকে স্বাধীনভাবে বড় হতে পারবে।
+                    full_mask = np.zeros((h, w), dtype=np.uint8)
+                    full_mask[y1:y2, x1:x2] = matched_alpha[0:mask_y_end, 0:mask_x_end]
                     
-                    # ২. শেপটিকে ঠিক ২ পিক্সেল বড় করা (Dilate) যাতে তারার বাইরের চিকন আউটলাইন (Outline) ঢেকে যায়
-                    kernel = np.ones((5, 5), np.uint8)
-                    expanded_mask = cv2.dilate(core_mask, kernel, iterations=1)
+                    # ২. থ্রেশহোল্ড 25 রাখা হলো যাতে remove.bg এর চারকোনা অদৃশ্য নয়েজ বাদ যায় 
+                    # এবং শুধু একদম অরিজিনাল তারার শেপটুকু থাকে।
+                    _, pure_star = cv2.threshold(full_mask, 25, 255, cv2.THRESH_BINARY)
                     
-                    # ৩. বড় করা মাস্ক দিয়ে ইনপেইন্ট করা (TELEA অ্যালগরিদম)
-                    inpainted_roi = cv2.inpaint(roi, expanded_mask, 3, cv2.INPAINT_TELEA).astype(np.float32)
+                    # ৩. একটি গোল (ELLIPSE) কার্নেল দিয়ে মাস্কটিকে বড় করা হচ্ছে।
+                    # 15x15 সাইজ দেওয়ায় এটি তারার অবশিষ্ট কোণাগুলোকেও পুরোপুরি গিলে ফেলবে এবং
+                    # ব্লার করার জায়গাটি একদম তারার মতোই দেখতে হবে, স্কয়ার হবে না!
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+                    perfect_mask = cv2.dilate(pure_star, kernel, iterations=1)
                     
-                    # ৪. ব্যাকগ্রাউন্ডের সাথে মেশানোর জন্য একটি পালকের মতো নরম মাস্ক (Feathered/Soft Mask) তৈরি করা
-                    blend_mask = cv2.GaussianBlur(expanded_mask.astype(np.float32), (5, 5), 0) / 255.0
-                    blend_mask_3d = np.repeat(blend_mask[:, :, np.newaxis], 3, axis=2)
-                    
-                    # ৫. অরিজিনাল ছবি এবং ইনপেইন্ট করা ছবির পারফেক্ট ব্লেন্ডিং
-                    final_roi = roi_float * (1.0 - blend_mask_3d) + inpainted_roi * blend_mask_3d
-                    
-                    result[y1:y2, x1:x2] = np.clip(final_roi, 0, 255).astype(np.uint8)
+                    # ৪. পুরো ছবির ওপর ইনপেইন্ট করা (TELEA অ্যালগরিদম ব্লার করার জন্য সেরা)
+                    result = cv2.inpaint(img, perfect_mask, 5, cv2.INPAINT_TELEA)
                 
         # মেটাডেটা রিকভারি
         result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
@@ -167,7 +162,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Expanded Feathered Blending Active."
+    return "Server is Live! Full-Canvas Star Masking is Active."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
