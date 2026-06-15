@@ -13,7 +13,7 @@ CORS(app, expose_headers=["Content-Disposition"])
 
 TEMPLATE_PATH = 'watermark_template.png'
 
-def process_image(file_bytes, filename):
+def process_image(file_bytes, filename, method='blur'):
     try:
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -33,12 +33,6 @@ def process_image(file_bytes, filename):
             template_alpha = template[:, :, 3]
             
             found = None
-            
-            # ==========================================================
-            # MAGIC FIX 1: Strict Corner ROI (Region of Interest)
-            # ==========================================================
-            # স্ক্যানিং এরিয়া ৭০% করে দেওয়া হয়েছে। এখন সে শুধু ডানদিকের একদম নিচের কোণায় স্ক্যান করবে।
-            # ফলে বাঁশ, ঘাস বা অন্য কোনো উজ্জ্বল জিনিসকে সে ওয়াটারমার্ক ভাববে না।
             roi_y1 = int(h * 0.70)
             roi_x1 = int(w * 0.70)
             search_img = img[roi_y1:h, roi_x1:w]
@@ -47,10 +41,6 @@ def process_image(file_bytes, filename):
                 roi_y1, roi_x1 = 0, 0
                 search_img = img
 
-            # ==========================================================
-            # MAGIC FIX 2: Restricted Scale Range
-            # ==========================================================
-            # সাইজ রেঞ্জ 0.6 থেকে 2.5 করা হয়েছে। খুব ছোট (0.2) সাইজ বাদ দেওয়া হয়েছে যাতে False Positive না হয়।
             for scale in np.linspace(0.6, 2.5, 25):
                 resized_w = int(template_bgr.shape[1] * scale)
                 resized_h = int(template_bgr.shape[0] * scale)
@@ -67,7 +57,6 @@ def process_image(file_bytes, filename):
                     global_max_loc = (max_loc[0] + roi_x1, max_loc[1] + roi_y1)
                     found = (max_val, global_max_loc, scale, (resized_h, resized_w), res_alpha)
                     
-            # থ্রেশহোল্ড 0.30 করা হয়েছে, যা আরও বেশি একুরেট
             threshold = 0.30
             if found and found[0] >= threshold:
                 max_val, max_loc, scale, (th, tw), matched_alpha = found
@@ -79,16 +68,29 @@ def process_image(file_bytes, filename):
                 mask_x_end = x2 - x1
                 
                 if mask_x_end > 0 and mask_y_end > 0:
-                    # ফুল-ক্যানভাস স্টার মাস্কিং (যাতে স্কয়ার ব্লার না হয়)
-                    full_mask = np.zeros((h, w), dtype=np.uint8)
-                    full_mask[y1:y2, x1:x2] = matched_alpha[0:mask_y_end, 0:mask_x_end]
                     
-                    _, pure_star = cv2.threshold(full_mask, 25, 255, cv2.THRESH_BINARY)
-                    
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-                    perfect_mask = cv2.dilate(pure_star, kernel, iterations=1)
-                    
-                    result = cv2.inpaint(img, perfect_mask, 5, cv2.INPAINT_TELEA)
+                    # ==========================================================
+                    # MAGIC FIX: Crop vs Blur Method Selection
+                    # ==========================================================
+                    if method == 'crop':
+                        # স্মার্ট ক্রপ: হিসাব করবে নিচ থেকে কাটলে ভালো নাকি ডান থেকে
+                        loss_bottom = (h - y1) * w
+                        loss_right = (w - x1) * h
+                        
+                        if loss_bottom < loss_right:
+                            result = img[0:y1, :] # নিচ থেকে ক্রপ
+                        else:
+                            result = img[:, 0:x1] # ডান দিক থেকে ক্রপ
+                    else:
+                        # অরিজিনাল সাইজ রেখে স্মুথ ব্লার পদ্ধতি
+                        full_mask = np.zeros((h, w), dtype=np.uint8)
+                        full_mask[y1:y2, x1:x2] = matched_alpha[0:mask_y_end, 0:mask_x_end]
+                        
+                        _, pure_star = cv2.threshold(full_mask, 25, 255, cv2.THRESH_BINARY)
+                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+                        perfect_mask = cv2.dilate(pure_star, kernel, iterations=1)
+                        
+                        result = cv2.inpaint(img, perfect_mask, 5, cv2.INPAINT_TELEA)
                 
         # মেটাডেটা রিকভারি ও সেভ
         result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
@@ -121,10 +123,12 @@ def process_image(file_bytes, filename):
 def process():
     files = request.files.getlist('images')
     zip_file = request.files.get('zipfile')
+    # ফ্রন্টএন্ড থেকে মেথড রিসিভ করা হচ্ছে (ডিফল্ট: blur)
+    method = request.form.get('method', 'blur')
 
     if files and len(files) == 1 and files[0].filename != '' and not zip_file:
         file = files[0]
-        processed_bytes = process_image(file.read(), file.filename)
+        processed_bytes = process_image(file.read(), file.filename, method)
         if processed_bytes:
             mimetype = 'image/png' if file.filename.lower().endswith('.png') else 'image/jpeg'
             return send_file(io.BytesIO(processed_bytes), mimetype=mimetype, as_attachment=True, download_name=f"clean_{file.filename}")
@@ -135,7 +139,7 @@ def process():
             for file in files:
                 if file.filename == '': continue
                 file_data = file.read()
-                processed_bytes = process_image(file_data, file.filename)
+                processed_bytes = process_image(file_data, file.filename, method)
                 if processed_bytes:
                     zf.writestr(f"clean_{file.filename}", processed_bytes)
                 del file_data
@@ -149,7 +153,7 @@ def process():
                     if not filename.lower().endswith(('.png', '.jpg', '.jpeg')): continue
                     
                     file_data = uploaded_zip.read(filename)
-                    processed_bytes = process_image(file_data, filename)
+                    processed_bytes = process_image(file_data, filename, method)
                     
                     if processed_bytes:
                         zf.writestr(filename, processed_bytes)
@@ -163,7 +167,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Strict Corner ROI and Scale Limit Applied."
+    return "Server is Live! Crop and Blur dual methods active."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
