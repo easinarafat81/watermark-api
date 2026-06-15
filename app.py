@@ -68,29 +68,29 @@ def process_image(file_bytes, filename):
                 mask_x_end = x2 - x1
                 
                 if mask_x_end > 0 and mask_y_end > 0:
-                    roi = result[y1:y2, x1:x2].astype(np.float32)
+                    roi = result[y1:y2, x1:x2]
+                    roi_float = roi.astype(np.float32)
                     base_alpha = matched_alpha[0:mask_y_end, 0:mask_x_end]
                     
-                    # ১. ইনপেইন্টিংয়ের জন্য একটি বেসিক মাস্ক তৈরি করা (খুব চিকন)
-                    _, hard_mask = cv2.threshold(base_alpha, 10, 255, cv2.THRESH_BINARY)
-                    kernel = np.ones((3, 3), np.uint8)
-                    hard_mask = cv2.dilate(hard_mask, kernel, iterations=1)
-                    
-                    # ২. শুধু ওয়াটারমার্কের জায়গাটুকু ইনপেইন্ট করা (Telea অ্যালগরিদম টেক্সচারের জন্য ভালো)
-                    inpainted_roi = cv2.inpaint(result[y1:y2, x1:x2], hard_mask, 3, cv2.INPAINT_TELEA).astype(np.float32)
-                    
                     # ==========================================================
-                    # MAGIC FIX: Pixel-Perfect Soft Blending 
+                    # MAGIC FIX: Exact 2-Pixel Dilation + Feathered Blending
                     # ==========================================================
-                    # ৩. তারার শেপ অনুযায়ী একটি সফট মাস্ক (Soft Mask) তৈরি করা হচ্ছে।
-                    blend_mask = base_alpha.astype(np.float32) / 255.0
-                    blend_mask = np.clip(blend_mask * 1.5, 0, 1.0) # তারার ভেতরের অংশ ১০০% ইনপেইন্ট হবে
-                    blend_mask = cv2.GaussianBlur(blend_mask, (3, 3), 0) # কোণাগুলো স্মুথ করা হলো
+                    # ১. তারার মূল শেপ ধরা (খুব হালকা অংশও যেন বাদ না যায়)
+                    _, core_mask = cv2.threshold(base_alpha, 3, 255, cv2.THRESH_BINARY)
+                    
+                    # ২. শেপটিকে ঠিক ২ পিক্সেল বড় করা (Dilate) যাতে তারার বাইরের চিকন আউটলাইন (Outline) ঢেকে যায়
+                    kernel = np.ones((5, 5), np.uint8)
+                    expanded_mask = cv2.dilate(core_mask, kernel, iterations=1)
+                    
+                    # ৩. বড় করা মাস্ক দিয়ে ইনপেইন্ট করা (TELEA অ্যালগরিদম)
+                    inpainted_roi = cv2.inpaint(roi, expanded_mask, 3, cv2.INPAINT_TELEA).astype(np.float32)
+                    
+                    # ৪. ব্যাকগ্রাউন্ডের সাথে মেশানোর জন্য একটি পালকের মতো নরম মাস্ক (Feathered/Soft Mask) তৈরি করা
+                    blend_mask = cv2.GaussianBlur(expanded_mask.astype(np.float32), (5, 5), 0) / 255.0
                     blend_mask_3d = np.repeat(blend_mask[:, :, np.newaxis], 3, axis=2)
                     
-                    # ৪. অরিজিনাল ঘাস এবং ইনপেইন্ট করা ছবির সংমিশ্রণ (Blending)
-                    # এর ফলে ঘাসের যেসব জায়গায় তারা নেই, সেখানে অরিজিনাল ছবি ১০০% অক্ষত থাকবে!
-                    final_roi = roi * (1.0 - blend_mask_3d) + inpainted_roi * blend_mask_3d
+                    # ৫. অরিজিনাল ছবি এবং ইনপেইন্ট করা ছবির পারফেক্ট ব্লেন্ডিং
+                    final_roi = roi_float * (1.0 - blend_mask_3d) + inpainted_roi * blend_mask_3d
                     
                     result[y1:y2, x1:x2] = np.clip(final_roi, 0, 255).astype(np.uint8)
                 
@@ -167,7 +167,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Pixel-Perfect Soft Blending Active."
+    return "Server is Live! Expanded Feathered Blending Active."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
