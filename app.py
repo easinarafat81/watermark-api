@@ -43,7 +43,6 @@ def process_image(file_bytes, filename, method='blur'):
                 roi_y1, roi_x1 = 0, 0
                 search_img = img
 
-            # পারফেক্ট স্কেল খোঁজা
             for scale in np.linspace(0.5, 2.5, 30):
                 resized_w = int(template_bgr.shape[1] * scale)
                 resized_h = int(template_bgr.shape[0] * scale)
@@ -73,7 +72,7 @@ def process_image(file_bytes, filename, method='blur'):
                 if mask_x_end > 0 and mask_y_end > 0:
                     
                     if str(method).strip().lower() == 'crop':
-                        # স্মার্ট ক্রপ মেথড
+                        # স্মার্ট ক্রপ
                         crop_y = max(0, y1 - 2)
                         crop_x = max(0, x1 - 2)
                         
@@ -86,28 +85,41 @@ def process_image(file_bytes, filename, method='blur'):
                             result = img[:, 0:crop_x]
                     else:
                         # ==========================================================
-                        # THE ULTIMATE MAGIC: Exact Reverse Alpha Blending
+                        # THE ULTIMATE MAGIC: Exact Reverse Alpha + Black Spot Fallback
                         # ==========================================================
-                        # অরিজিনাল পিক্সেলগুলো আলাদা করা হলো
                         roi = result[y1:y2, x1:x2].astype(np.float32)
                         
-                        # টেমপ্লেট থেকে ওয়াটারমার্কের স্বচ্ছতা (Alpha map) ০.০ - ১.০ রেঞ্জে বের করা হলো
-                        exact_alpha = matched_alpha[0:mask_y_end, 0:mask_x_end].astype(np.float32) / 255.0
+                        # ⚠️ হারানো অংশ: জেমিনাইয়ের ওয়াটারমার্কের আসল অপাসিটি হলো ৩৪% (0.34)
+                        # এটি ছাড়া অংকের হিসাব মাইনাস হয়ে কালো দাগ হয়ে যায়!
+                        OPACITY = 0.34 
                         
-                        # BGR কালার চ্যানেলের জন্য ৩টি ডাইমেনশন তৈরি করা হলো
+                        base_alpha = matched_alpha[0:mask_y_end, 0:mask_x_end].astype(np.float32) / 255.0
+                        exact_alpha = base_alpha * OPACITY
+                        
                         alpha_3d = np.repeat(exact_alpha[:, :, np.newaxis], 3, axis=2)
-                        
-                        # ম্যাথমেটিকাল ডিভিশন বাই জিরো (Division by zero) এরর এড়াতে ম্যাক্স আলফা ০.৯৫ এ আটকে দেওয়া হলো
                         alpha_3d = np.clip(alpha_3d, 0.0, 0.95)
                         
-                        # গাণিতিক সূত্র প্রয়োগ: পিক্সেল থেকে সাদা রং (255) বিয়োগ করা
-                        recovered_pixels = (roi - 255.0 * alpha_3d) / (1.0 - alpha_3d)
+                        # রিভার্স আলফা সূত্র (সাদা রং বিয়োগ করা)
+                        raw_recovered = (roi - 255.0 * alpha_3d) / (1.0 - alpha_3d + 1e-6)
                         
-                        # ডেটা ০-২৫৫ রেঞ্জের মধ্যে রেখে ছবিতে রিপ্লেস করা
-                        recovered_pixels = np.clip(recovered_pixels, 0, 255).astype(np.uint8)
+                        # ডার্ক ব্যাকগ্রাউন্ড ফলব্যাক (Dark Background Fallback)
+                        # যদি কোনো পিক্সেল ডার্ক হওয়ার কারণে মাইনাস (Negative) হয়ে যায়, শুধু সেগুলোকে আলাদা করা
+                        failed_mask = (raw_recovered < 0).any(axis=2).astype(np.uint8) * 255
+                        
+                        # বাকি স্বাভাবিক পিক্সেলগুলোকে 0-255 এর মধ্যে রাখা
+                        recovered_pixels = np.clip(raw_recovered, 0, 255).astype(np.uint8)
+                        
+                        # যদি কোথাও কালো বা মাইনাস পিক্সেল থাকে, শুধু সেই ছোট্ট কালো বিন্দুটুকু ইনপেইন্ট করে দেওয়া
+                        if np.any(failed_mask):
+                            failed_mask = cv2.dilate(failed_mask, np.ones((3, 3), np.uint8), iterations=1)
+                            inpainted_fallback = cv2.inpaint(recovered_pixels, failed_mask, 3, cv2.INPAINT_TELEA)
+                            # কালো বিন্দুর জায়গায় ইনপেইন্ট বসানো, বাকি সব অরিজিনাল রিভার্স পিক্সেল রাখা
+                            recovered_pixels = np.where(failed_mask[:, :, np.newaxis] == 255, inpainted_fallback, recovered_pixels)
+
+                        # ফিক্স করা ছবি বসানো
                         result[y1:y2, x1:x2] = recovered_pixels
                 
-        # মেটাডেটা ও EXIF রিকভারি এবং সেভ করা
+        # মেটাডেটা রিকভারি ও সেভ
         result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(result_rgb)
         
@@ -181,7 +193,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Pure Reverse Alpha Blending is fully active."
+    return "Server is Live! True Reverse Alpha Blending with Fallback Active."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
