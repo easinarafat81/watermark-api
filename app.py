@@ -33,22 +33,25 @@ def process_image(file_bytes, filename, method='blur'):
             template_alpha = template[:, :, 3]
             
             found = None
-            roi_y1 = int(h * 0.70)
-            roi_x1 = int(w * 0.70)
+            
+            # শুধুমাত্র ডানদিকের নিচের অংশে স্ক্যান করবে
+            roi_y1 = int(h * 0.65)
+            roi_x1 = int(w * 0.65)
             search_img = img[roi_y1:h, roi_x1:w]
             
             if search_img.shape[0] < 50 or search_img.shape[1] < 50:
                 roi_y1, roi_x1 = 0, 0
                 search_img = img
 
-            for scale in np.linspace(0.6, 2.5, 25):
+            # পারফেক্ট স্কেল খোঁজা
+            for scale in np.linspace(0.5, 2.5, 30):
                 resized_w = int(template_bgr.shape[1] * scale)
                 resized_h = int(template_bgr.shape[0] * scale)
                 
                 if resized_h > search_img.shape[0] or resized_w > search_img.shape[1] or resized_h == 0 or resized_w == 0: continue
                     
-                res_bgr = cv2.resize(template_bgr, (resized_w, resized_h))
-                res_alpha = cv2.resize(template_alpha, (resized_w, resized_h))
+                res_bgr = cv2.resize(template_bgr, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+                res_alpha = cv2.resize(template_alpha, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
                 
                 res = cv2.matchTemplate(search_img, res_bgr, cv2.TM_CCORR_NORMED, mask=res_alpha)
                 _, max_val, _, max_loc = cv2.minMaxLoc(res)
@@ -69,30 +72,42 @@ def process_image(file_bytes, filename, method='blur'):
                 
                 if mask_x_end > 0 and mask_y_end > 0:
                     
-                    # ==========================================================
-                    # MAGIC FIX: Crop vs Blur Method Selection
-                    # ==========================================================
-                    if method == 'crop':
-                        # স্মার্ট ক্রপ: হিসাব করবে নিচ থেকে কাটলে ভালো নাকি ডান থেকে
-                        loss_bottom = (h - y1) * w
-                        loss_right = (w - x1) * h
+                    if str(method).strip().lower() == 'crop':
+                        # স্মার্ট ক্রপ মেথড
+                        crop_y = max(0, y1 - 2)
+                        crop_x = max(0, x1 - 2)
+                        
+                        loss_bottom = (h - crop_y) * w
+                        loss_right = (w - crop_x) * h
                         
                         if loss_bottom < loss_right:
-                            result = img[0:y1, :] # নিচ থেকে ক্রপ
+                            result = img[0:crop_y, :]
                         else:
-                            result = img[:, 0:x1] # ডান দিক থেকে ক্রপ
+                            result = img[:, 0:crop_x]
                     else:
-                        # অরিজিনাল সাইজ রেখে স্মুথ ব্লার পদ্ধতি
-                        full_mask = np.zeros((h, w), dtype=np.uint8)
-                        full_mask[y1:y2, x1:x2] = matched_alpha[0:mask_y_end, 0:mask_x_end]
+                        # ==========================================================
+                        # THE ULTIMATE MAGIC: Exact Reverse Alpha Blending
+                        # ==========================================================
+                        # অরিজিনাল পিক্সেলগুলো আলাদা করা হলো
+                        roi = result[y1:y2, x1:x2].astype(np.float32)
                         
-                        _, pure_star = cv2.threshold(full_mask, 25, 255, cv2.THRESH_BINARY)
-                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-                        perfect_mask = cv2.dilate(pure_star, kernel, iterations=1)
+                        # টেমপ্লেট থেকে ওয়াটারমার্কের স্বচ্ছতা (Alpha map) ০.০ - ১.০ রেঞ্জে বের করা হলো
+                        exact_alpha = matched_alpha[0:mask_y_end, 0:mask_x_end].astype(np.float32) / 255.0
                         
-                        result = cv2.inpaint(img, perfect_mask, 5, cv2.INPAINT_TELEA)
+                        # BGR কালার চ্যানেলের জন্য ৩টি ডাইমেনশন তৈরি করা হলো
+                        alpha_3d = np.repeat(exact_alpha[:, :, np.newaxis], 3, axis=2)
+                        
+                        # ম্যাথমেটিকাল ডিভিশন বাই জিরো (Division by zero) এরর এড়াতে ম্যাক্স আলফা ০.৯৫ এ আটকে দেওয়া হলো
+                        alpha_3d = np.clip(alpha_3d, 0.0, 0.95)
+                        
+                        # গাণিতিক সূত্র প্রয়োগ: পিক্সেল থেকে সাদা রং (255) বিয়োগ করা
+                        recovered_pixels = (roi - 255.0 * alpha_3d) / (1.0 - alpha_3d)
+                        
+                        # ডেটা ০-২৫৫ রেঞ্জের মধ্যে রেখে ছবিতে রিপ্লেস করা
+                        recovered_pixels = np.clip(recovered_pixels, 0, 255).astype(np.uint8)
+                        result[y1:y2, x1:x2] = recovered_pixels
                 
-        # মেটাডেটা রিকভারি ও সেভ
+        # মেটাডেটা ও EXIF রিকভারি এবং সেভ করা
         result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(result_rgb)
         
@@ -123,8 +138,7 @@ def process_image(file_bytes, filename, method='blur'):
 def process():
     files = request.files.getlist('images')
     zip_file = request.files.get('zipfile')
-    # ফ্রন্টএন্ড থেকে মেথড রিসিভ করা হচ্ছে (ডিফল্ট: blur)
-    method = request.form.get('method', 'blur')
+    method = request.form.get('method', 'blur').strip().lower()
 
     if files and len(files) == 1 and files[0].filename != '' and not zip_file:
         file = files[0]
@@ -167,7 +181,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Crop and Blur dual methods active."
+    return "Server is Live! Pure Reverse Alpha Blending is fully active."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
