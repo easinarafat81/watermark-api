@@ -62,28 +62,37 @@ def process_image(file_bytes, filename):
                 max_val, max_loc, scale, (th, tw), matched_alpha = found
                 x1, y1 = max_loc
                 
-                # ==========================================================
-                # MAGIC FIX: Perfect Inpainting Mask (Thick & Precise)
-                # ==========================================================
-                # ১. থ্রেশহোল্ড (Threshold) 5 করা হয়েছে, যাতে তারার চারপাশের ঝাপসা অংশও বাদ না পড়ে।
-                _, tight_mask = cv2.threshold(matched_alpha, 5, 255, cv2.THRESH_BINARY)
-                
-                # ২. মাস্কটিকে অনেক বেশি মোটা (7x7, 2 iterations) করা হয়েছে। 
-                # এখন ওয়াটারমার্কের কোনো সাদা পিক্সেলই বাইরে থাকবে না, ফলে কোনো ঘোলা দাগও তৈরি হবে না।
-                kernel = np.ones((7, 7), np.uint8)
-                thick_mask = cv2.dilate(tight_mask, kernel, iterations=2)
-                
-                main_mask = np.zeros((h, w), dtype=np.uint8)
                 y2 = min(y1 + th, h)
                 x2 = min(x1 + tw, w)
                 mask_y_end = y2 - y1
                 mask_x_end = x2 - x1
                 
-                main_mask[y1:y2, x1:x2] = thick_mask[0:mask_y_end, 0:mask_x_end]
-                
-                # ৩. INPAINT_NS (Navier-Stokes) ব্যবহার করা হয়েছে এবং রেডিয়াস 4 দেওয়া হয়েছে। 
-                # এটি ঝুড়ির খাঁজ বা লাইন জোড়া লাগাতে সবচেয়ে ভালো কাজ করে।
-                result = cv2.inpaint(img, main_mask, 4, cv2.INPAINT_NS)
+                if mask_x_end > 0 and mask_y_end > 0:
+                    roi = result[y1:y2, x1:x2].astype(np.float32)
+                    base_alpha = matched_alpha[0:mask_y_end, 0:mask_x_end]
+                    
+                    # ১. ইনপেইন্টিংয়ের জন্য একটি বেসিক মাস্ক তৈরি করা (খুব চিকন)
+                    _, hard_mask = cv2.threshold(base_alpha, 10, 255, cv2.THRESH_BINARY)
+                    kernel = np.ones((3, 3), np.uint8)
+                    hard_mask = cv2.dilate(hard_mask, kernel, iterations=1)
+                    
+                    # ২. শুধু ওয়াটারমার্কের জায়গাটুকু ইনপেইন্ট করা (Telea অ্যালগরিদম টেক্সচারের জন্য ভালো)
+                    inpainted_roi = cv2.inpaint(result[y1:y2, x1:x2], hard_mask, 3, cv2.INPAINT_TELEA).astype(np.float32)
+                    
+                    # ==========================================================
+                    # MAGIC FIX: Pixel-Perfect Soft Blending 
+                    # ==========================================================
+                    # ৩. তারার শেপ অনুযায়ী একটি সফট মাস্ক (Soft Mask) তৈরি করা হচ্ছে।
+                    blend_mask = base_alpha.astype(np.float32) / 255.0
+                    blend_mask = np.clip(blend_mask * 1.5, 0, 1.0) # তারার ভেতরের অংশ ১০০% ইনপেইন্ট হবে
+                    blend_mask = cv2.GaussianBlur(blend_mask, (3, 3), 0) # কোণাগুলো স্মুথ করা হলো
+                    blend_mask_3d = np.repeat(blend_mask[:, :, np.newaxis], 3, axis=2)
+                    
+                    # ৪. অরিজিনাল ঘাস এবং ইনপেইন্ট করা ছবির সংমিশ্রণ (Blending)
+                    # এর ফলে ঘাসের যেসব জায়গায় তারা নেই, সেখানে অরিজিনাল ছবি ১০০% অক্ষত থাকবে!
+                    final_roi = roi * (1.0 - blend_mask_3d) + inpainted_roi * blend_mask_3d
+                    
+                    result[y1:y2, x1:x2] = np.clip(final_roi, 0, 255).astype(np.uint8)
                 
         # মেটাডেটা রিকভারি
         result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
@@ -158,7 +167,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Advanced Thick-Mask Inpainting Active."
+    return "Server is Live! Pixel-Perfect Soft Blending Active."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
