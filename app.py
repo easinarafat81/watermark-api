@@ -33,15 +33,25 @@ def process_image(file_bytes, filename):
             template_alpha = template[:, :, 3]
             
             found = None
-            roi_y1 = int(h * 0.60)
-            roi_x1 = int(w * 0.60)
+            
+            # ==========================================================
+            # MAGIC FIX 1: Strict Corner ROI (Region of Interest)
+            # ==========================================================
+            # স্ক্যানিং এরিয়া ৭০% করে দেওয়া হয়েছে। এখন সে শুধু ডানদিকের একদম নিচের কোণায় স্ক্যান করবে।
+            # ফলে বাঁশ, ঘাস বা অন্য কোনো উজ্জ্বল জিনিসকে সে ওয়াটারমার্ক ভাববে না।
+            roi_y1 = int(h * 0.70)
+            roi_x1 = int(w * 0.70)
             search_img = img[roi_y1:h, roi_x1:w]
             
             if search_img.shape[0] < 50 or search_img.shape[1] < 50:
                 roi_y1, roi_x1 = 0, 0
                 search_img = img
 
-            for scale in np.linspace(0.2, 3.0, 30):
+            # ==========================================================
+            # MAGIC FIX 2: Restricted Scale Range
+            # ==========================================================
+            # সাইজ রেঞ্জ 0.6 থেকে 2.5 করা হয়েছে। খুব ছোট (0.2) সাইজ বাদ দেওয়া হয়েছে যাতে False Positive না হয়।
+            for scale in np.linspace(0.6, 2.5, 25):
                 resized_w = int(template_bgr.shape[1] * scale)
                 resized_h = int(template_bgr.shape[0] * scale)
                 
@@ -57,7 +67,8 @@ def process_image(file_bytes, filename):
                     global_max_loc = (max_loc[0] + roi_x1, max_loc[1] + roi_y1)
                     found = (max_val, global_max_loc, scale, (resized_h, resized_w), res_alpha)
                     
-            threshold = 0.25
+            # থ্রেশহোল্ড 0.30 করা হয়েছে, যা আরও বেশি একুরেট
+            threshold = 0.30
             if found and found[0] >= threshold:
                 max_val, max_loc, scale, (th, tw), matched_alpha = found
                 x1, y1 = max_loc
@@ -68,28 +79,18 @@ def process_image(file_bytes, filename):
                 mask_x_end = x2 - x1
                 
                 if mask_x_end > 0 and mask_y_end > 0:
-                    # ==========================================================
-                    # MAGIC FIX: Full-Canvas Star Masking (No Square Edges)
-                    # ==========================================================
-                    # ১. মাস্কটিকে আগে পুরো ছবির সমান একটি বিশাল কালো ক্যানভাসে বসানো হচ্ছে। 
-                    # এর ফলে এটি চারদিকে স্বাধীনভাবে বড় হতে পারবে।
+                    # ফুল-ক্যানভাস স্টার মাস্কিং (যাতে স্কয়ার ব্লার না হয়)
                     full_mask = np.zeros((h, w), dtype=np.uint8)
                     full_mask[y1:y2, x1:x2] = matched_alpha[0:mask_y_end, 0:mask_x_end]
                     
-                    # ২. থ্রেশহোল্ড 25 রাখা হলো যাতে remove.bg এর চারকোনা অদৃশ্য নয়েজ বাদ যায় 
-                    # এবং শুধু একদম অরিজিনাল তারার শেপটুকু থাকে।
                     _, pure_star = cv2.threshold(full_mask, 25, 255, cv2.THRESH_BINARY)
                     
-                    # ৩. একটি গোল (ELLIPSE) কার্নেল দিয়ে মাস্কটিকে বড় করা হচ্ছে।
-                    # 15x15 সাইজ দেওয়ায় এটি তারার অবশিষ্ট কোণাগুলোকেও পুরোপুরি গিলে ফেলবে এবং
-                    # ব্লার করার জায়গাটি একদম তারার মতোই দেখতে হবে, স্কয়ার হবে না!
                     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
                     perfect_mask = cv2.dilate(pure_star, kernel, iterations=1)
                     
-                    # ৪. পুরো ছবির ওপর ইনপেইন্ট করা (TELEA অ্যালগরিদম ব্লার করার জন্য সেরা)
                     result = cv2.inpaint(img, perfect_mask, 5, cv2.INPAINT_TELEA)
                 
-        # মেটাডেটা রিকভারি
+        # মেটাডেটা রিকভারি ও সেভ
         result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(result_rgb)
         
@@ -162,7 +163,7 @@ def process():
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Live! Full-Canvas Star Masking is Active."
+    return "Server is Live! Strict Corner ROI and Scale Limit Applied."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
